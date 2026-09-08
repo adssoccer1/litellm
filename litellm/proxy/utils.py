@@ -3272,7 +3272,9 @@ class ProxyLogging:
             _cached_guardrail_data: dict | None = None
             _guardrail_data_computed = False
             pipeline_managed: Final = (
-                _pipeline_managed_guardrail_names(data, "post_call") if caps.has_guardrail else frozenset()
+                _pipeline_step_guardrail_names(_streamable_post_call_pipelines(data, user_api_key_dict))
+                if caps.has_guardrail
+                else frozenset()
             )
 
             for callback in litellm.callbacks:

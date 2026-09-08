@@ -2118,20 +2118,28 @@ async def test_pipeline_executor_discards_text_rewrite_when_translation_lacks_wr
 
 
 @pytest.mark.asyncio
-async def test_per_chunk_streaming_hook_skips_pipeline_managed_guardrail(
+async def test_per_chunk_streaming_hook_skips_streamable_pipeline_managed_guardrail(
     proxy_logging, make_user_api_key_auth, monkeypatch
 ):
     seen: Dict[str, Any] = {}
 
-    class RecordingGuardrail(CustomGuardrail):
+    class StreamableRecordingGuardrail(CustomGuardrail):
+        async def apply_guardrail(self, inputs, request_data, input_type, logging_obj=None):
+            return inputs
+
         async def async_post_call_streaming_hook(self, user_api_key_dict, response):
             seen[self.guardrail_name] = seen.get(self.guardrail_name, 0) + 1
             return None
 
-    managed = RecordingGuardrail(
+    class FreeRecordingGuardrail(CustomGuardrail):
+        async def async_post_call_streaming_hook(self, user_api_key_dict, response):
+            seen[self.guardrail_name] = seen.get(self.guardrail_name, 0) + 1
+            return None
+
+    managed = StreamableRecordingGuardrail(
         guardrail_name="gr-post", event_hook=GuardrailEventHooks.post_call, default_on=True
     )
-    free = RecordingGuardrail(
+    free = FreeRecordingGuardrail(
         guardrail_name="gr-free", event_hook=GuardrailEventHooks.post_call, default_on=True
     )
     monkeypatch.setattr(litellm, "callbacks", [managed, free])
@@ -2147,3 +2155,36 @@ async def test_per_chunk_streaming_hook_skips_pipeline_managed_guardrail(
     assert result is not None
     assert seen.get("gr-post") is None
     assert seen["gr-free"] == 1
+
+
+@pytest.mark.asyncio
+async def test_per_chunk_streaming_hook_runs_non_streamable_pipeline_managed_guardrail(
+    proxy_logging, make_user_api_key_auth, monkeypatch
+):
+    """Regression: a pipeline step whose guardrail only overrides the per-chunk
+    hook (no ``apply_guardrail``) leaves its pipeline non-streamable, so the
+    gated stream cannot govern it. The per-chunk hook must still run against
+    the stream; otherwise the guardrail is dropped entirely on streaming
+    responses even though it ran before pipelines existed."""
+    seen: Dict[str, Any] = {}
+
+    class RecordingGuardrail(CustomGuardrail):
+        async def async_post_call_streaming_hook(self, user_api_key_dict, response):
+            seen[self.guardrail_name] = seen.get(self.guardrail_name, 0) + 1
+            return None
+
+    managed = RecordingGuardrail(
+        guardrail_name="gr-post", event_hook=GuardrailEventHooks.post_call, default_on=True
+    )
+    monkeypatch.setattr(litellm, "callbacks", [managed])
+    monkeypatch.setattr("litellm.proxy.proxy_server.llm_router", None, raising=False)
+    data = _post_call_pipeline_data(stream=True)
+
+    result = await proxy_logging.async_post_call_streaming_hook(
+        data=data,
+        response=_stream_chunks()[0],
+        user_api_key_dict=make_user_api_key_auth(request_route="/v1/chat/completions"),
+    )
+
+    assert result is not None
+    assert seen["gr-post"] == 1
